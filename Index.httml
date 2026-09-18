@@ -1,1 +1,373 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<title>Meld Cast Receiver</title>
+<script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+<style>
+  :root {
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #000;
+    color: #fff;
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    overflow: hidden;
+  }
 
+  #bg {
+    position: fixed; inset: -60px;
+    background-size: cover;
+    background-position: center;
+    filter: blur(50px) saturate(1.6) brightness(0.55);
+    transform: scale(1.15);
+    transition: background-image 0.6s ease;
+    z-index: 0;
+  }
+  #bg::after {
+    content: "";
+    position: absolute; inset: 0;
+    background: radial-gradient(ellipse at center, rgba(0,0,0,0.15) 0%, rgba(0,0,0,0.75) 100%);
+  }
+
+  #stage {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    height: 100%;
+    padding: 5vh 6vw;
+    gap: 5vw;
+    align-items: center;
+  }
+
+  #left {
+    flex: 0 0 32%;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2vh;
+  }
+
+  #art {
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    border-radius: 18px;
+    object-fit: cover;
+    box-shadow: 0 25px 60px rgba(0,0,0,0.55);
+    background: #111;
+  }
+
+  #meta { width: 100%; }
+  #title {
+    font-size: 2.1vw;
+    font-weight: 700;
+    line-height: 1.25;
+    text-shadow: 0 2px 12px rgba(0,0,0,0.5);
+  }
+  #artist {
+    margin-top: 0.6vh;
+    font-size: 1.3vw;
+    font-weight: 500;
+    color: rgba(255,255,255,0.7);
+  }
+
+  #progressWrap {
+    width: 100%;
+    margin-top: 1.5vh;
+  }
+  #progressBarBg {
+    width: 100%;
+    height: 5px;
+    border-radius: 3px;
+    background: rgba(255,255,255,0.18);
+    overflow: hidden;
+  }
+  #progressBarFill {
+    height: 100%;
+    width: 0%;
+    background: #fff;
+    border-radius: 3px;
+    transition: width 0.25s linear;
+  }
+  #timeRow {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 0.6vh;
+    font-size: 0.9vw;
+    color: rgba(255,255,255,0.55);
+    font-variant-numeric: tabular-nums;
+  }
+
+  #status {
+    margin-top: 1vh;
+    font-size: 1vw;
+    color: rgba(255,255,255,0.4);
+    letter-spacing: 0.03em;
+  }
+
+  /* Lyrics */
+  #lyricsWrap {
+    flex: 1;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    overflow: hidden;
+    position: relative;
+    mask-image: linear-gradient(to bottom,
+      transparent 0%, black 15%, black 85%, transparent 100%);
+  }
+  #lyrics {
+    width: 100%;
+    transition: transform 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .line {
+    font-size: 2.6vw;
+    font-weight: 700;
+    line-height: 1.5;
+    color: rgba(255,255,255,0.32);
+    transition: color 0.4s ease, transform 0.4s ease, filter 0.4s ease;
+    filter: blur(0.4px);
+    transform-origin: left center;
+  }
+  .line.active {
+    color: #fff;
+    transform: scale(1.04);
+    filter: blur(0);
+  }
+  .line.done {
+    color: rgba(255,255,255,0.2);
+  }
+  /* word-level highlight support (used when karaoke data is available) */
+  .word { transition: color 0.15s linear; }
+  .word.sung { color: #fff; }
+  .word.unsung { color: rgba(255,255,255,0.32); }
+
+  #emptyLyrics {
+    font-size: 1.4vw;
+    color: rgba(255,255,255,0.35);
+    font-weight: 500;
+  }
+</style>
+</head>
+<body>
+  <div id="bg"></div>
+  <div id="stage">
+    <div id="left">
+      <img id="art" src="" alt="">
+      <div id="meta">
+        <div id="title">In attesa di riproduzione…</div>
+        <div id="artist"></div>
+        <div id="progressWrap">
+          <div id="progressBarBg"><div id="progressBarFill"></div></div>
+          <div id="timeRow"><span id="timeCur">0:00</span><span id="timeDur">0:00</span></div>
+        </div>
+        <div id="status"></div>
+      </div>
+    </div>
+    <div id="lyricsWrap">
+      <div id="lyrics"><div id="emptyLyrics">Nessun testo disponibile</div></div>
+    </div>
+  </div>
+
+<script>
+const context = cast.framework.CastReceiverContext.getInstance();
+const playerManager = context.getPlayerManager();
+
+let lyricsLines = [];
+let lyricsMode = 'none';
+let activeLineIndex = -1;
+let lastFetchKey = '';
+
+function fmtTime(sec) {
+  if (!isFinite(sec) || sec < 0) sec = 0;
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60).toString().padStart(2, '0');
+  return `${m}:${s}`;
+}
+
+function setStatus(text) {
+  document.getElementById('status').textContent = text;
+}
+
+function updateNowPlayingUI(mediaInfo) {
+  const meta = (mediaInfo && mediaInfo.metadata) || {};
+  const title = meta.title || meta.songName || '';
+  const artist = meta.artist || meta.subtitle || (meta.artists && meta.artists.join(', ')) || '';
+
+  document.getElementById('title').textContent = title || 'In riproduzione';
+  document.getElementById('artist').textContent = artist;
+
+  const images = meta.images;
+  if (images && images.length) {
+    const url = images[0].url;
+    document.getElementById('art').src = url;
+    document.getElementById('bg').style.backgroundImage = `url("${url}")`;
+  }
+
+  const key = `${title}__${artist}`;
+  if (key !== lastFetchKey) {
+    lastFetchKey = key;
+    if (title) fetchLyrics(title, artist);
+  }
+}
+
+function updateProgressUI(currentSec, durationSec) {
+  const pct = durationSec > 0 ? Math.min(100, (currentSec / durationSec) * 100) : 0;
+  document.getElementById('progressBarFill').style.width = pct + '%';
+  document.getElementById('timeCur').textContent = fmtTime(currentSec);
+  document.getElementById('timeDur').textContent = fmtTime(durationSec);
+  updateLyricsHighlight(currentSec);
+}
+
+function renderLyrics() {
+  const container = document.getElementById('lyrics');
+  if (!lyricsLines.length) {
+    container.innerHTML = '<div id="emptyLyrics">Nessun testo disponibile</div>';
+    return;
+  }
+  container.innerHTML = lyricsLines.map((line, i) => {
+    if (lyricsMode === 'word' && line.words && line.words.length) {
+      const spans = line.words.map(w =>
+        `<span class="word" data-t="${w.time}">${escapeHtml(w.text)} </span>`
+      ).join('');
+      return `<div class="line" id="line-${i}" data-t="${line.time}">${spans}</div>`;
+    }
+    return `<div class="line" id="line-${i}" data-t="${line.time}">${escapeHtml(line.text)}</div>`;
+  }).join('');
+  activeLineIndex = -1;
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function updateLyricsHighlight(currentSec) {
+  if (!lyricsLines.length) return;
+
+  let idx = -1;
+  for (let i = 0; i < lyricsLines.length; i++) {
+    if (lyricsLines[i].time <= currentSec) idx = i; else break;
+  }
+  if (idx !== activeLineIndex) {
+    const prevEl = document.getElementById(`line-${activeLineIndex}`);
+    if (prevEl) { prevEl.classList.remove('active'); prevEl.classList.add('done'); }
+    const el = document.getElementById(`line-${idx}`);
+    if (el) {
+      el.classList.add('active');
+      el.classList.remove('done');
+      const wrap = document.getElementById('lyricsWrap');
+      const offset = el.offsetTop - (wrap.clientHeight / 2) + (el.clientHeight / 2);
+      document.getElementById('lyrics').style.transform = `translateY(${-offset}px)`;
+    }
+    activeLineIndex = idx;
+  }
+
+  if (lyricsMode === 'word' && idx >= 0 && lyricsLines[idx].words) {
+    const el = document.getElementById(`line-${idx}`);
+    if (el) {
+      const spans = el.querySelectorAll('.word');
+      spans.forEach(s => {
+        const t = parseFloat(s.dataset.t);
+        s.classList.toggle('sung', t <= currentSec);
+        s.classList.toggle('unsung', t > currentSec);
+      });
+    }
+  }
+}
+
+async function fetchLyrics(title, artist) {
+  lyricsLines = [];
+  lyricsMode = 'none';
+  renderLyrics();
+  setStatus('Ricerca testo…');
+
+  try {
+    const ttml = await tryAmllTtmlDb(title, artist);
+    if (ttml) {
+      lyricsLines = ttml;
+      lyricsMode = 'word';
+      renderLyrics();
+      setStatus('Testo sincronizzato (parola per parola)');
+      return;
+    }
+  } catch (e) {
+    console.log('AMLL TTML DB lookup failed, falling back to LRCLIB', e);
+  }
+
+  try {
+    const url = `https://lrclib.net/api/get?track_name=${encodeURIComponent(title)}&artist_name=${encodeURIComponent(artist)}`;
+    const res = await fetch(url);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.syncedLyrics) {
+        lyricsLines = parseLRC(data.syncedLyrics);
+        lyricsMode = 'line';
+        renderLyrics();
+        setStatus('Testo sincronizzato');
+        return;
+      }
+      if (data.plainLyrics) {
+        lyricsLines = [{ time: 0, text: data.plainLyrics }];
+        lyricsMode = 'none';
+        renderLyrics();
+        setStatus('Testo non sincronizzato');
+        return;
+      }
+    }
+  } catch (e) {
+    console.log('LRCLIB lookup failed', e);
+  }
+
+  setStatus('');
+  renderLyrics();
+}
+
+function parseLRC(lrc) {
+  const out = [];
+  const timeTag = /\[(\d{2}):(\d{2})(?:\.(\d{2,3}))?\]/g;
+  for (const rawLine of lrc.split('\n')) {
+    const matches = [...rawLine.matchAll(timeTag)];
+    if (!matches.length) continue;
+    const text = rawLine.replace(timeTag, '').trim();
+    for (const m of matches) {
+      const min = parseInt(m[1], 10);
+      const sec = parseInt(m[2], 10);
+      const ms = m[3] ? parseInt(m[3].padEnd(3, '0'), 10) : 0;
+      out.push({ time: min * 60 + sec + ms / 1000, text });
+    }
+  }
+  out.sort((a, b) => a.time - b.time);
+  return out;
+}
+
+async function tryAmllTtmlDb(title, artist) {
+  return null;
+}
+
+playerManager.addEventListener(
+  cast.framework.events.EventType.MEDIA_STATUS,
+  () => {
+    const info = playerManager.getMediaInformation();
+    if (info) updateNowPlayingUI(info);
+  }
+);
+
+playerManager.addEventListener(
+  cast.framework.events.EventType.TIME_UPDATE,
+  (event) => {
+    const info = playerManager.getMediaInformation();
+    const duration = (info && info.duration) || 0;
+    updateProgressUI(event.currentMediaTime || 0, duration);
+  }
+);
+
+const options = new cast.framework.CastReceiverOptions();
+options.disableIdleTimeout = true;
+context.start(options);
+</script>
+</body>
+</html>
