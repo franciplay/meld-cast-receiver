@@ -149,9 +149,21 @@
     color: rgba(255,255,255,0.35);
     font-weight: 500;
   }
+
+  cast-media-player {
+    position: fixed;
+    top: -9999px;
+    left: -9999px;
+    width: 1px;
+    height: 1px;
+    opacity: 0.001;
+    pointer-events: none;
+    z-index: -1;
+  }
 </style>
 </head>
 <body>
+  <cast-media-player id="castPlayer"></cast-media-player>
   <div id="bg"></div>
   <div id="stage">
     <div id="left">
@@ -172,13 +184,37 @@
   </div>
 
 <script>
+/* ============================================================
+   MELD CAST RECEIVER
+   Custom CAF (Cast Application Framework) web receiver.
+   Fetches synced lyrics client-side using title/artist metadata
+   that Google Cast already delivers with every LOAD request —
+   no changes needed on the Meld Android app for this to work,
+   beyond pointing the sender at this receiver's App ID.
+
+   Lyrics sources, in order of preference:
+     1. AMLL TTML DB  -> word-level ("karaoke") sync, when a
+        match exists for the track (community-maintained, free,
+        no auth: https://github.com/Steve-xmh/amll-ttml-db)
+     2. LRCLIB         -> line-level sync, much larger coverage
+        (https://lrclib.net, free, no auth)
+
+   NOTE: this file has not been validated on real Cast hardware.
+   The CAF Receiver SDK event/field names below match the public
+   docs as of writing, but Google's SDK does change field shapes
+   between versions — test on your actual device/TV and expect to
+   fix small field-name mismatches (see TODO markers).
+   ============================================================ */
+
 const context = cast.framework.CastReceiverContext.getInstance();
 const playerManager = context.getPlayerManager();
 
-let lyricsLines = [];
-let lyricsMode = 'none';
+let lyricsLines = [];       // [{time: seconds, text: string, words?: [{time, text}]}]
+let lyricsMode = 'none';    // 'word' | 'line' | 'none'
 let activeLineIndex = -1;
 let lastFetchKey = '';
+
+/* ---------- UI helpers ---------- */
 
 function fmtTime(sec) {
   if (!isFinite(sec) || sec < 0) sec = 0;
@@ -192,9 +228,11 @@ function setStatus(text) {
 }
 
 function updateNowPlayingUI(mediaInfo) {
-  const meta = (mediaInfo && mediaInfo.metadata) || {};
-  const title = meta.title || meta.songName || '';
-  const artist = meta.artist || meta.subtitle || (meta.artists && meta.artists.join(', ')) || '';
+  if (!mediaInfo) return;
+  const meta = mediaInfo.metadata || {};
+  const custom = mediaInfo.customData || {};
+  const title = meta.title || custom.title || meta.songName || '';
+  const artist = meta.artist || custom.artist || meta.subtitle || (meta.artists && meta.artists.join(', ')) || '';
 
   document.getElementById('title').textContent = title || 'In riproduzione';
   document.getElementById('artist').textContent = artist;
@@ -220,6 +258,8 @@ function updateProgressUI(currentSec, durationSec) {
   document.getElementById('timeDur').textContent = fmtTime(durationSec);
   updateLyricsHighlight(currentSec);
 }
+
+/* ---------- Lyrics rendering ---------- */
 
 function renderLyrics() {
   const container = document.getElementById('lyrics');
@@ -248,6 +288,7 @@ function escapeHtml(s) {
 function updateLyricsHighlight(currentSec) {
   if (!lyricsLines.length) return;
 
+  // find current line
   let idx = -1;
   for (let i = 0; i < lyricsLines.length; i++) {
     if (lyricsLines[i].time <= currentSec) idx = i; else break;
@@ -259,6 +300,7 @@ function updateLyricsHighlight(currentSec) {
     if (el) {
       el.classList.add('active');
       el.classList.remove('done');
+      // center the active line in the viewport
       const wrap = document.getElementById('lyricsWrap');
       const offset = el.offsetTop - (wrap.clientHeight / 2) + (el.clientHeight / 2);
       document.getElementById('lyrics').style.transform = `translateY(${-offset}px)`;
@@ -266,6 +308,7 @@ function updateLyricsHighlight(currentSec) {
     activeLineIndex = idx;
   }
 
+  // word-level highlight within the active line, if available
   if (lyricsMode === 'word' && idx >= 0 && lyricsLines[idx].words) {
     const el = document.getElementById(`line-${idx}`);
     if (el) {
@@ -279,12 +322,17 @@ function updateLyricsHighlight(currentSec) {
   }
 }
 
+/* ---------- Lyrics fetching ---------- */
+
 async function fetchLyrics(title, artist) {
   lyricsLines = [];
   lyricsMode = 'none';
   renderLyrics();
   setStatus('Ricerca testo…');
 
+  // 1. Try AMLL TTML DB for word-level sync (best-effort; DB is ID-indexed,
+  //    so this relies on their search surface finding a title/artist match).
+  //    TODO: confirm exact search endpoint/shape — see amll-ttml-db repo.
   try {
     const ttml = await tryAmllTtmlDb(title, artist);
     if (ttml) {
@@ -298,6 +346,7 @@ async function fetchLyrics(title, artist) {
     console.log('AMLL TTML DB lookup failed, falling back to LRCLIB', e);
   }
 
+  // 2. Fall back to LRCLIB (line-synced, much larger coverage)
   try {
     const url = `https://lrclib.net/api/get?track_name=${encodeURIComponent(title)}&artist_name=${encodeURIComponent(artist)}`;
     const res = await fetch(url);
@@ -311,6 +360,7 @@ async function fetchLyrics(title, artist) {
         return;
       }
       if (data.plainLyrics) {
+        // unsynced fallback: show as a single static block, no highlight
         lyricsLines = [{ time: 0, text: data.plainLyrics }];
         lyricsMode = 'none';
         renderLyrics();
@@ -344,10 +394,33 @@ function parseLRC(lrc) {
   return out;
 }
 
+// Placeholder — wire up once the AMLL TTML DB search endpoint is confirmed.
+// Returns null (no match) until implemented, so the LRCLIB fallback always
+// keeps things working in the meantime.
 async function tryAmllTtmlDb(title, artist) {
   return null;
 }
 
+/* ---------- Cast Receiver SDK wiring ---------- */
+
+// 1. Intercept the LOAD command immediately when the phone commands playback
+playerManager.setMessageInterceptor(
+  cast.framework.messages.MessageType.LOAD,
+  loadRequestData => {
+    console.log('LOAD message intercepted:', loadRequestData);
+    if (loadRequestData && loadRequestData.media) {
+      updateNowPlayingUI(loadRequestData.media);
+      const customDur = loadRequestData.media.customData && (loadRequestData.media.customData.duration || (loadRequestData.media.customData.durationMs / 1000));
+      const mediaDur = loadRequestData.media.duration;
+      const duration = mediaDur || customDur || 0;
+      updateProgressUI(0, duration);
+      setStatus('Caricamento…');
+    }
+    return loadRequestData;
+  }
+);
+
+// 2. Metadata status updates
 playerManager.addEventListener(
   cast.framework.events.EventType.MEDIA_STATUS,
   () => {
@@ -356,17 +429,38 @@ playerManager.addEventListener(
   }
 );
 
+// 3. Playback progress and lyrics synchronization
 playerManager.addEventListener(
   cast.framework.events.EventType.TIME_UPDATE,
   (event) => {
     const info = playerManager.getMediaInformation();
-    const duration = (info && info.duration) || 0;
+    const duration = (info && info.duration) || 
+                     (info && info.customData && (info.customData.duration || (info.customData.durationMs / 1000))) || 
+                     (playerManager.getDuration ? playerManager.getDuration() : 0);
     updateProgressUI(event.currentMediaTime || 0, duration);
   }
 );
 
+// 4. Playback started
+playerManager.addEventListener(
+  cast.framework.events.EventType.PLAYING,
+  () => {
+    setStatus('');
+  }
+);
+
+// 5. Error diagnostics
+playerManager.addEventListener(
+  cast.framework.events.EventType.ERROR,
+  (event) => {
+    console.error('CAF Player Error:', event);
+    const code = event.detailedErrorCode || event.reason || 'Errore';
+    setStatus('Errore riproduzione (' + code + ')');
+  }
+);
+
 const options = new cast.framework.CastReceiverOptions();
-options.disableIdleTimeout = true;
+options.disableIdleTimeout = true; // keep the receiver visible between tracks
 context.start(options);
 </script>
 </body>
