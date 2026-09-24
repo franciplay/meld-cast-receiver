@@ -69,8 +69,6 @@
     flex-direction: column;
     align-items: flex-start;
     gap: 2vh;
-    transition: transform 0.6s cubic-bezier(0.22, 1, 0.36, 1);
-    will-change: transform;
   }
 
   #art {
@@ -136,11 +134,6 @@
     height: 100%;
     overflow: hidden;
     position: relative;
-    transition: opacity 0.4s ease;
-  }
-  #lyricsWrap.no-lyrics {
-    opacity: 0;
-    pointer-events: none;
   }
   #lyrics {
     width: 100%;
@@ -320,57 +313,14 @@ function updateProgressUI(currentSec, durationSec) {
   updateLyricsHighlight(currentSec);
 }
 
-/* ---------- Centered layout when no lyrics ---------- */
-/* When a track has no lyrics (instrumental, not found, etc.), the left
-   player card animates from its normal left-aligned position to the
-   horizontal center of the stage, and the lyrics panel fades out.
-   The offset is computed at runtime (not via CSS flex/margin transitions,
-   which animate unreliably across TV browsers) and applied as a
-   transform, which animates smoothly and consistently everywhere. */
-let isCentered = null; // null = not yet set, avoids a spurious transition on first paint
-
-function applyCenteredLayout(centered) {
-  const stage = document.getElementById('stage');
-  const left = document.getElementById('left');
-  const lyricsWrap = document.getElementById('lyricsWrap');
-
-  if (centered) {
-    const stageRect = stage.getBoundingClientRect();
-    const leftRect = left.getBoundingClientRect();
-    const leftWidthNoTransform = leftRect.width; // transform doesn't affect layout width
-    const currentLeftEdge = leftRect.left - stageRect.left;
-    const targetLeftEdge = (stageRect.width - leftWidthNoTransform) / 2;
-    const offset = targetLeftEdge - currentLeftEdge;
-    left.style.transform = `translateX(${offset}px)`;
-    lyricsWrap.classList.add('no-lyrics');
-  } else {
-    left.style.transform = 'translateX(0)';
-    lyricsWrap.classList.remove('no-lyrics');
-  }
-}
-
-function updateLayoutForLyrics(hasLyrics) {
-  const centered = !hasLyrics;
-  if (centered === isCentered) return; // no change, skip recompute
-  isCentered = centered;
-  applyCenteredLayout(centered);
-}
-
-// Recompute the centered offset on resize (px offset depends on stage width)
-window.addEventListener('resize', () => {
-  if (isCentered === true) applyCenteredLayout(true);
-});
-
 /* ---------- Lyrics rendering ---------- */
 
 function renderLyrics() {
   const container = document.getElementById('lyrics');
   if (!lyricsLines.length) {
     container.innerHTML = '<div id="emptyLyrics">Nessun testo disponibile</div>';
-    updateLayoutForLyrics(false);
     return;
   }
-  updateLayoutForLyrics(true);
   container.innerHTML = lyricsLines.map((line, i) => {
     if (lyricsMode === 'word' && line.words && line.words.length) {
       const spans = line.words.map(w =>
@@ -480,7 +430,7 @@ async function fetchLyrics(title, artist) {
   try {
     const url = `https://lrclib.net/api/get?track_name=${encodeURIComponent(title)}&artist_name=${encodeURIComponent(artist)}`;
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 4000);
+    const timeoutId = setTimeout(() => controller.abort(), 1500);
     const res = await fetch(url, { signal: controller.signal });
     clearTimeout(timeoutId);
     if (res.ok) {
@@ -617,20 +567,6 @@ playerManager.addEventListener(
   }
 );
 
-// 4b. Track ended. NOTE: this does NOT auto-advance to the next track —
-// that requires the Android sender to load a Cast Queue (queueLoad with
-// multiple MediaQueueItems) instead of a single-track LOAD. Once it does,
-// CAF's built-in QueueManager handles advancing AND preloading the next
-// item automatically, with no extra receiver code needed. Until then,
-// this just reflects the real state instead of silently doing nothing.
-playerManager.addEventListener(
-  cast.framework.events.EventType.ENDED,
-  () => {
-    stopPlaybackTicker();
-    setStatus('Traccia terminata — in attesa della prossima');
-  }
-);
-
 // 5. Error diagnostics
 playerManager.addEventListener(
   cast.framework.events.EventType.ERROR,
@@ -641,10 +577,6 @@ playerManager.addEventListener(
     stopPlaybackTicker();
   }
 );
-
-// Idle state (before any track has loaded) starts centered too, since
-// there's nothing to show in the lyrics panel yet.
-updateLayoutForLyrics(false);
 
 const options = new cast.framework.CastReceiverOptions();
 options.disableIdleTimeout = true; // keep the receiver visible between tracks
